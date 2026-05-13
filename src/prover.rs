@@ -1,10 +1,12 @@
 use ark_bn254::Fr;
-use ark_ff::{FftField, Field, UniformRand, Zero};
+use ark_ff::{FftField, Field, PrimeField, UniformRand, Zero};
 use ark_poly::DenseUVPolynomial;
+use ark_poly::Polynomial;
 use ark_poly::{
     EvaluationDomain, Evaluations, GeneralEvaluationDomain, univariate::DenseOrSparsePolynomial,
     univariate::DensePolynomial,
 };
+use sha2::Digest;
 
 use crate::core::compute_merkle_root;
 use crate::data::ProverValues;
@@ -55,7 +57,7 @@ fn calculate_composite_polynomial(
     domain: &GeneralEvaluationDomain<Fr>,
     extended_domain: &GeneralEvaluationDomain<Fr>,
     target: Fr,
-) -> [u8; 32] {
+) -> (Vec<Fr>, [u8; 32]) {
     // let f: DensePolynomial<Fr> = DensePolynomial::from_coefficients_vec(domain.ifft(trace));
 
     let g = domain.group_gen();
@@ -134,7 +136,63 @@ fn calculate_composite_polynomial(
     let composite_polynomial = &(&(&p0 * alpha_0) + &(&p1 * alpha_1)) + &(&p3 * alpha_2);
     let composite_polynomial_evaluations = extended_domain.fft(&composite_polynomial.coeffs);
     let cp_commitment = compute_merkle_root(&composite_polynomial_evaluations);
-    cp_commitment
+    (composite_polynomial_evaluations, cp_commitment)
+}
+
+fn random_fr_from_hash(input: &[u8]) -> Fr {
+    let hash = sha2::Sha256::digest(input);
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&hash);
+    Fr::from_le_bytes_mod_order(&bytes)
+}
+
+fn fri_layer(evals: &[Fr], beta: Fr, domain: &[Fr]) -> (Vec<Fr>, Vec<Fr>) {
+    let n = evals.len();
+    let half = n / 2;
+
+    let mut next_evals = Vec::with_capacity(half);
+    let mut next_domain = Vec::with_capacity(half);
+
+    for i in 0..half {
+        let x = domain[i];
+        let neg_x = domain[i + half];
+        let fx = evals[i];
+        let fnx = evals[i + half];
+
+        let two_inv = Fr::from(2u64).inverse().unwrap();
+        let g = (fx + fnx) * two_inv;
+        let h = (fx - fnx) * two_inv * x.inverse().unwrap();
+
+        next_evals.push(g + beta * h);
+        next_domain.push(x * x);
+    }
+    (next_evals, next_domain)
+}
+
+fn calculate_fri_commitments(
+    extended_evals: &[Fr],
+    extended_domain: &[Fr],
+    extended_trace_commitment: &[u8; 32],
+    cp_commitment: &[u8; 32],
+) -> Vec<[u8; 32]> {
+    let mut fiat_shamir_seed: Vec<u8> = Vec::with_capacity(64);
+    fiat_shamir_seed.extend_from_slice(extended_trace_commitment);
+    fiat_shamir_seed.extend_from_slice(cp_commitment);
+    let mut current_evals = extended_evals.to_vec();
+    let mut current_domain = extended_domain.to_vec();
+    let mut commitments: Vec<[u8; 32]> = Vec::new();
+    while current_evals.len() > 1 {
+        // add the latest committment to the seed
+        let last_commitment = commitments.last().cloned().unwrap_or([0u8; 32]);
+        fiat_shamir_seed.extend_from_slice(&last_commitment);
+        let beta = random_fr_from_hash(&fiat_shamir_seed);
+        let (next_evals, next_domain) = fri_layer(&current_evals, beta, &current_domain);
+        let next_commitment = compute_merkle_root(&next_evals);
+        commitments.push(next_commitment);
+        current_evals = next_evals;
+        current_domain = next_domain;
+    }
+    commitments
 }
 
 pub fn generate_prover_values(a0: Fr, a1: Fr, trace_length: usize) -> ProverValues {
@@ -142,14 +200,23 @@ pub fn generate_prover_values(a0: Fr, a1: Fr, trace_length: usize) -> ProverValu
     let (trace_polynomial, domain) = calculate_trace_polynomial(&trace);
     let (extended_trace, extended_domain) =
         lde_on_coset(&trace_polynomial, trace_length, 8, Fr::GENERATOR);
-    let cp_commitment = calculate_composite_polynomial(
+    let extended_trace_commitment = compute_merkle_root(&extended_trace);
+    let (cp_evaluations, cp_commitment) = calculate_composite_polynomial(
         &trace_polynomial,
         &domain,
         &extended_domain,
         *trace.last().unwrap(),
     );
+    let extended_domain_points: Vec<Fr> = extended_domain.elements().collect();
+    let fri_commitments = calculate_fri_commitments(
+        &cp_evaluations,
+        &extended_domain_points,
+        &extended_trace_commitment,
+        &cp_commitment,
+    );
     ProverValues {
-        extended_trace_commitment: compute_merkle_root(&extended_trace),
+        extended_trace_commitment,
         composite_polynomial_commitment: cp_commitment,
+        fri_commitments,
     }
 }

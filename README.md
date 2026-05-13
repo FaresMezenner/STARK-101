@@ -24,3 +24,12 @@ Now we will turn the statements to statements about polynomials as follows:
 
 We will then calculate the Composition Polynomial: $CP = \alpha_0 p_0 + \alpha_1 p_1 + \alpha_2 p_2 + \alpha_3 p_3$, where $\alpha_i$ are random field elements. The prover will then commit to the coefficients of $CP$ using a Merkle tree.
 Proving that CP is a polynomial implies that $p_0, p_1, p_2, p_3$ are polynomials, which in turn implies that the original statements about the trace are true.
+
+##  Part 3
+
+Instead of proving that $CP$ is a polynomial, we will prove that $CP$ is CLOSE to a polynomial of degree $d$ using FRI as follows:
+
+- The prover has already committed to the evaluations of $CP$ on the extended domain (the 2-aditive subgroup of size 64).
+- The verifier will then sample a random point $\beta$ and ask the prover to provide commitment to $CP'$ where $CP'(X) = g(X) + \beta·h(X)$ such that $CP(X) = g(X) + X·h(X)$, in other words, $g(X)$ is the even part of $CP$ and $h(X)$ is the odd part of $CP$.
+- The commitment happens using the evaluation of $CP'$ on smaller and fresh domain.
+- repeat the above steps until the bounded degree becomes $d<1$.
