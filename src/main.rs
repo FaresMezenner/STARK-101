@@ -2,6 +2,7 @@ use ark_bn254::Fr;
 
 use crate::prover::generate_prover_values;
 
+mod core;
 mod data;
 mod prover;
 

@@ -1,5 +1,6 @@
 use ark_bn254::Fr;
 
 pub struct ProverValues {
-    pub extended_trace: Vec<Fr>,
+    pub extended_trace_commitment: [u8; 32],
+    pub composite_polynomial_commitment: [u8; 32],
 }
