@@ -33,3 +33,13 @@ Instead of proving that $CP$ is a polynomial, we will prove that $CP$ is CLOSE t
 - The verifier will then sample a random point $\beta$ and ask the prover to provide commitment to $CP'$ where $CP'(X) = g(X) + \beta·h(X)$ such that $CP(X) = g(X) + X·h(X)$, in other words, $g(X)$ is the even part of $CP$ and $h(X)$ is the odd part of $CP$.
 - The commitment happens using the evaluation of $CP'$ on smaller and fresh domain.
 - repeat the above steps until the bounded degree becomes $d<1$.
+
+##  Part 4
+
+Finally, the verifier will keep querying the prover for the evaluations of the polynomials on random points $q$, and the prover will need to prove that:
+
+- The jump from the trace polynomial to the composition polynomial is correct: $CP(q) = \alpha_0 p_0(q) + \alpha_1 p_1(q) + \alpha_2 p_2(q) + \alpha_3 p_3(q)$
+- The jump from the composition polynomial to the first FRI layer is correct: $CP(q) = g(q) + q·h(q)$, where $g(X)$ and $h(X)$ are the even and odd parts of $CP$ respectively.
+- The jump from each FRI layer to the next is correct: $CP'(q) = g'(q) + q·h'(q)$, where $g'(X)$ and $h'(X)$ are the even and odd parts of $CP'$ respectively.
+
+Like this, the verifier can be convinced that $CP$ is close to a low degree polynomial at the set of random points, which implies that $CP$ is a low degree polynomial with high probability, which in turn implies that the original statements about the trace are true with high probability.

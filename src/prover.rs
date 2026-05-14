@@ -1,7 +1,7 @@
 use ark_bn254::Fr;
 use ark_bn254::fr;
 use ark_crypto_primitives::merkle_tree;
-use ark_ff::{FftField, Field, PrimeField, UniformRand, Zero};
+use ark_ff::{BigInteger, FftField, Field, PrimeField, UniformRand, Zero};
 use ark_poly::DenseUVPolynomial;
 use ark_poly::Polynomial;
 use ark_poly::{
@@ -12,6 +12,7 @@ use sha2::Digest;
 
 use crate::core::compute_merkle_root;
 use crate::core::integer_from_hash;
+use crate::core::random_fr_from_hash;
 use crate::data::CpPair;
 use crate::data::ProverValues;
 use crate::data::QueryProof;
@@ -62,6 +63,7 @@ fn calculate_composite_polynomial(
     f: &DensePolynomial<Fr>,
     domain: &GeneralEvaluationDomain<Fr>,
     extended_domain: &GeneralEvaluationDomain<Fr>,
+    offset: Fr,
     target: Fr,
 ) -> (Vec<Fr>, Vec<Vec<[u8; 32]>>, [u8; 32]) {
     // let f: DensePolynomial<Fr> = DensePolynomial::from_coefficients_vec(domain.ifft(trace));
@@ -135,25 +137,31 @@ fn calculate_composite_polynomial(
     assert!(p3_remainder.is_zero(), "p3 division must be exact");
 
     // now calculating CP using p0, p1, p3 and random linear combination
-    let mut rng = rand::thread_rng();
-    let alpha_0 = Fr::rand(&mut rng);
-    let alpha_1 = Fr::rand(&mut rng);
-    let alpha_2 = Fr::rand(&mut rng);
+    let mut alpha_seed: Vec<u8> = Vec::new();
+    // use the target and generator of the domain as part of the seed
+    alpha_seed.extend_from_slice(target.into_bigint().to_bytes_le().as_slice());
+    alpha_seed.extend_from_slice(g.into_bigint().to_bytes_le().as_slice());
+    let alpha_0 = random_fr_from_hash(&alpha_seed);
+    alpha_seed.extend_from_slice(alpha_0.into_bigint().to_bytes_le().as_slice());
+    let alpha_1 = random_fr_from_hash(&alpha_seed);
+    alpha_seed.extend_from_slice(alpha_1.into_bigint().to_bytes_le().as_slice());
+    let alpha_2 = random_fr_from_hash(&alpha_seed);
+
     let composite_polynomial = &(&(&p0 * alpha_0) + &(&p1 * alpha_1)) + &(&p3 * alpha_2);
-    let composite_polynomial_evaluations = extended_domain.fft(&composite_polynomial.coeffs);
+    let shifted_coeffs = composite_polynomial
+        .coeffs
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| c * offset.pow(&[i as u64]))
+        .collect::<Vec<_>>();
+    let composite_polynomial_evaluations: Vec<Fr> =
+        extended_domain.fft(&shifted_coeffs);
     let (cp_merkle_tree, cp_commitment) = compute_merkle_root(&composite_polynomial_evaluations);
     (
         composite_polynomial_evaluations,
         cp_merkle_tree,
         cp_commitment,
     )
-}
-
-fn random_fr_from_hash(input: &[u8]) -> Fr {
-    let hash = sha2::Sha256::digest(input);
-    let mut bytes = [0u8; 32];
-    bytes.copy_from_slice(&hash);
-    Fr::from_le_bytes_mod_order(&bytes)
 }
 
 fn fri_layer(evals: &[Fr], beta: Fr, domain: &[Fr]) -> (Vec<Fr>, Vec<Fr>) {
@@ -184,7 +192,7 @@ fn calculate_fri_commitments(
     extended_trace_commitment: &[u8; 32],
     cp_commitment: &[u8; 32],
 ) -> (Vec<Vec<Vec<[u8; 32]>>>, Vec<[u8; 32]>, Vec<Vec<Fr>>) {
-    let mut fiat_shamir_seed: Vec<u8> = Vec::with_capacity(64);
+    let mut fiat_shamir_seed: Vec<u8> = Vec::new();
     fiat_shamir_seed.extend_from_slice(extended_trace_commitment);
     fiat_shamir_seed.extend_from_slice(cp_commitment);
     let mut current_evals = extended_evals.to_vec();
@@ -194,8 +202,10 @@ fn calculate_fri_commitments(
     let mut evals: Vec<Vec<Fr>> = Vec::new();
     while current_evals.len() > 1 {
         // add the latest committment to the seed
-        let last_commitment = commitments.last().cloned().unwrap_or([0u8; 32]);
-        fiat_shamir_seed.extend_from_slice(&last_commitment);
+        if !commitments.is_empty() {
+            let last_commitment = commitments.last().cloned().unwrap();
+            fiat_shamir_seed.extend_from_slice(&last_commitment);
+        }
         let beta = random_fr_from_hash(&fiat_shamir_seed);
         let (next_evals, next_domain) = fri_layer(&current_evals, beta, &current_domain);
         let (next_merkle_tree, next_commitment) = compute_merkle_root(&next_evals);
@@ -211,8 +221,15 @@ fn calculate_fri_commitments(
 fn extract_path_from_merkle_tree(index: &usize, merkle_tree: &[Vec<[u8; 32]>]) -> Vec<[u8; 32]> {
     let mut path = Vec::with_capacity(merkle_tree.len());
     let mut current_index = index.clone();
-    for level in merkle_tree {
-        path.push(level[current_index]);
+    for level in merkle_tree.iter().take(merkle_tree.len().saturating_sub(1)) {
+        // push the sibling of the current node, since the verifier will need the siblings to recalculate the root
+        let sibling_index = if current_index % 2 == 0 {
+            current_index + 1
+        } else {
+            current_index - 1
+        };
+        path.push(level[sibling_index]);
+
         current_index /= 2;
     }
     path
@@ -235,11 +252,11 @@ fn calculate_query_proof(
     let gq: usize = (q + blowup_factor) % extended_trace_evals.len();
     let f_gx = ValueAndPath {
         value: extended_trace_evals[gq],
-        path: extract_path_from_merkle_tree(&q, extended_trace_merkle_tree),
+        path: extract_path_from_merkle_tree(&gq, extended_trace_merkle_tree),
     };
     let ggq = (gq + blowup_factor) % extended_trace_evals.len();
     let f_g2x = ValueAndPath {
-        value: extended_trace_evals[q],
+        value: extended_trace_evals[ggq],
         path: extract_path_from_merkle_tree(&ggq, extended_trace_merkle_tree),
     };
     let mut cp_pairs = Vec::with_capacity(1 + fri_evals.len());
@@ -257,15 +274,9 @@ fn calculate_query_proof(
         },
     });
 
-    for (i, (sub_cp_evals, sub_cp_merkle_tree)) in
-        fri_evals.iter().zip(fri_merkle_tree.iter()).enumerate()
+    for (sub_cp_evals, sub_cp_merkle_tree) in fri_evals.iter().zip(fri_merkle_tree.iter())
     {
-        let modulus = sub_cp_evals.len() as u128;
-        let mut index_u128 = (q % sub_cp_evals.len()) as u128;
-        for _ in 0..=i {
-            index_u128 = (index_u128 * index_u128) % modulus;
-        }
-        let index = index_u128 as usize;
+        let index = q % sub_cp_evals.len();
         let negative_index = (sub_cp_evals.len() / 2 + index) % sub_cp_evals.len();
         cp_pairs.push(CpPair {
             cp_x: ValueAndPath {
@@ -350,13 +361,14 @@ pub fn generate_prover_values(
     blowup_factor: usize,
     num_queries: usize,
 ) -> ProverValues {
+    let offset = Fr::GENERATOR;
     let trace = calculate_fib_square_trace(a0, a1, trace_length);
     let (trace_polynomial, domain) = calculate_trace_polynomial(&trace);
     let (extended_trace, extended_domain) = lde_on_coset(
         &trace_polynomial,
         trace_length,
         blowup_factor,
-        Fr::GENERATOR,
+        offset,
     );
     let (extended_trace_merke_tree, extended_trace_commitment) =
         compute_merkle_root(&extended_trace);
@@ -364,9 +376,10 @@ pub fn generate_prover_values(
         &trace_polynomial,
         &domain,
         &extended_domain,
+        offset,
         *trace.last().unwrap(),
     );
-    let extended_domain_points: Vec<Fr> = extended_domain.elements().collect();
+    let extended_domain_points: Vec<Fr> = extended_domain.elements().map(|x| x * offset).collect();
     let (fri_merkle_trees, fri_commitments, fri_evals) = calculate_fri_commitments(
         &cp_evaluations,
         &extended_domain_points,

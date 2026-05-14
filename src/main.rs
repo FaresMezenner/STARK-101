@@ -1,10 +1,11 @@
 use ark_bn254::Fr;
 
-use crate::prover::generate_prover_values;
+use crate::{prover::generate_prover_values, verifier::verify};
 
 mod core;
 mod data;
 mod prover;
+mod verifier;
 
 fn main() {
     // prover calculates the extended trace polynomial
@@ -15,4 +16,5 @@ fn main() {
         .parse()
         .expect("valid Fr element");
     let prover_values = generate_prover_values(a0, a1, 16, 8, 20);
+    verify(prover_values, 16, 8, 20, a15);
 }
