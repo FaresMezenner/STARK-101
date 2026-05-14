@@ -1,14 +1,10 @@
 use ark_bn254::Fr;
-use ark_bn254::fr;
-use ark_crypto_primitives::merkle_tree;
-use ark_ff::{BigInteger, FftField, Field, PrimeField, UniformRand, Zero};
+use ark_ff::{BigInteger, FftField, Field, PrimeField, Zero};
 use ark_poly::DenseUVPolynomial;
-use ark_poly::Polynomial;
 use ark_poly::{
     EvaluationDomain, Evaluations, GeneralEvaluationDomain, univariate::DenseOrSparsePolynomial,
     univariate::DensePolynomial,
 };
-use sha2::Digest;
 
 use crate::core::compute_merkle_root;
 use crate::core::integer_from_hash;

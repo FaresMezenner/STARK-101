@@ -1,5 +1,5 @@
 use ark_bn254::Fr;
-use ark_ff::{BigInteger, FftField, Field, PrimeField, UniformRand, Zero};
+use ark_ff::{BigInteger, FftField, Field, PrimeField};
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
 
 use crate::{
@@ -37,7 +37,7 @@ fn verify_trace_to_cp_consistency(
     f_g2x: Fr,
     cp_x: Fr,
     trace_length: usize,
-    blowup_factor: usize,
+    _blowup_factor: usize,
     target_value: Fr,
 ) {
     let domain = GeneralEvaluationDomain::<Fr>::new(trace_length)
@@ -203,7 +203,7 @@ pub fn verify(
     prover_values: ProverValues,
     size: usize,
     blowup_factor: usize,
-    num_queries: usize,
+    _num_queries: usize,
     target_value: Fr,
 ) {
     let mut fiat_shamir_seed: Vec<u8> = Vec::new();

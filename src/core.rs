@@ -1,5 +1,3 @@
-use core::hash;
-
 use ark_bn254::Fr;
 use ark_ff::{BigInteger, PrimeField};
 use sha2::{Digest, Sha256};
