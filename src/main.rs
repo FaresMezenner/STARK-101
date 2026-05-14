@@ -14,5 +14,5 @@ fn main() {
     let a15: Fr = "20058280215495444632052566758236617048289674862308296983290231865868158747890"
         .parse()
         .expect("valid Fr element");
-    let prover_values = generate_prover_values(a0, a1, 16);
+    let prover_values = generate_prover_values(a0, a1, 16, 8, 20);
 }

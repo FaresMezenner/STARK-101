@@ -1,3 +1,5 @@
+use core::hash;
+
 use ark_bn254::Fr;
 use ark_ff::{BigInteger, PrimeField};
 use sha2::{Digest, Sha256};
@@ -19,9 +21,17 @@ pub fn hash_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
         .expect("Hash output should be 32 bytes")
 }
 
-pub fn compute_merkle_root(leaves_values: &Vec<Fr>) -> [u8; 32] {
+pub fn compute_merkle_root(leaves_values: &[Fr]) -> (Vec<Vec<[u8; 32]>>, [u8; 32]) {
+    assert!(
+        !leaves_values.is_empty(),
+        "merkle tree requires at least one leaf"
+    );
+
     let mut current_level: Vec<[u8; 32]> = leaves_values.iter().map(fr_to_bytes).collect();
+    let mut merkle_tree: Vec<Vec<[u8; 32]>> = Vec::new();
+
     while current_level.len() > 1 {
+        merkle_tree.push(current_level.clone());
         current_level = current_level
             .chunks(2)
             .map(|chunk| {
@@ -31,5 +41,17 @@ pub fn compute_merkle_root(leaves_values: &Vec<Fr>) -> [u8; 32] {
             })
             .collect();
     }
-    current_level[0]
+    merkle_tree.push(current_level.clone());
+    (merkle_tree, current_level[0])
+}
+
+pub fn integer_from_hash(hash: &[u8], modulus: usize) -> usize {
+    if modulus == 0 {
+        return 0;
+    }
+    let mut result: usize = 0;
+    for byte in hash {
+        result = (result.wrapping_mul(256).wrapping_add(*byte as usize)) % modulus;
+    }
+    result
 }

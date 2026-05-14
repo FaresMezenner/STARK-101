@@ -1,4 +1,6 @@
 use ark_bn254::Fr;
+use ark_bn254::fr;
+use ark_crypto_primitives::merkle_tree;
 use ark_ff::{FftField, Field, PrimeField, UniformRand, Zero};
 use ark_poly::DenseUVPolynomial;
 use ark_poly::Polynomial;
@@ -9,7 +11,11 @@ use ark_poly::{
 use sha2::Digest;
 
 use crate::core::compute_merkle_root;
+use crate::core::integer_from_hash;
+use crate::data::CpPair;
 use crate::data::ProverValues;
+use crate::data::QueryProof;
+use crate::data::ValueAndPath;
 
 fn calculate_fib_square_trace(a0: Fr, a1: Fr, length: usize) -> Vec<Fr> {
     let mut trace: Vec<Fr> = vec![a0, a1];
@@ -57,7 +63,7 @@ fn calculate_composite_polynomial(
     domain: &GeneralEvaluationDomain<Fr>,
     extended_domain: &GeneralEvaluationDomain<Fr>,
     target: Fr,
-) -> (Vec<Fr>, [u8; 32]) {
+) -> (Vec<Fr>, Vec<Vec<[u8; 32]>>, [u8; 32]) {
     // let f: DensePolynomial<Fr> = DensePolynomial::from_coefficients_vec(domain.ifft(trace));
 
     let g = domain.group_gen();
@@ -135,8 +141,12 @@ fn calculate_composite_polynomial(
     let alpha_2 = Fr::rand(&mut rng);
     let composite_polynomial = &(&(&p0 * alpha_0) + &(&p1 * alpha_1)) + &(&p3 * alpha_2);
     let composite_polynomial_evaluations = extended_domain.fft(&composite_polynomial.coeffs);
-    let cp_commitment = compute_merkle_root(&composite_polynomial_evaluations);
-    (composite_polynomial_evaluations, cp_commitment)
+    let (cp_merkle_tree, cp_commitment) = compute_merkle_root(&composite_polynomial_evaluations);
+    (
+        composite_polynomial_evaluations,
+        cp_merkle_tree,
+        cp_commitment,
+    )
 }
 
 fn random_fr_from_hash(input: &[u8]) -> Fr {
@@ -155,7 +165,6 @@ fn fri_layer(evals: &[Fr], beta: Fr, domain: &[Fr]) -> (Vec<Fr>, Vec<Fr>) {
 
     for i in 0..half {
         let x = domain[i];
-        let neg_x = domain[i + half];
         let fx = evals[i];
         let fnx = evals[i + half];
 
@@ -174,49 +183,210 @@ fn calculate_fri_commitments(
     extended_domain: &[Fr],
     extended_trace_commitment: &[u8; 32],
     cp_commitment: &[u8; 32],
-) -> Vec<[u8; 32]> {
+) -> (Vec<Vec<Vec<[u8; 32]>>>, Vec<[u8; 32]>, Vec<Vec<Fr>>) {
     let mut fiat_shamir_seed: Vec<u8> = Vec::with_capacity(64);
     fiat_shamir_seed.extend_from_slice(extended_trace_commitment);
     fiat_shamir_seed.extend_from_slice(cp_commitment);
     let mut current_evals = extended_evals.to_vec();
     let mut current_domain = extended_domain.to_vec();
     let mut commitments: Vec<[u8; 32]> = Vec::new();
+    let mut merkle_trees: Vec<Vec<Vec<[u8; 32]>>> = Vec::new();
+    let mut evals: Vec<Vec<Fr>> = Vec::new();
     while current_evals.len() > 1 {
         // add the latest committment to the seed
         let last_commitment = commitments.last().cloned().unwrap_or([0u8; 32]);
         fiat_shamir_seed.extend_from_slice(&last_commitment);
         let beta = random_fr_from_hash(&fiat_shamir_seed);
         let (next_evals, next_domain) = fri_layer(&current_evals, beta, &current_domain);
-        let next_commitment = compute_merkle_root(&next_evals);
+        let (next_merkle_tree, next_commitment) = compute_merkle_root(&next_evals);
         commitments.push(next_commitment);
+        merkle_trees.push(next_merkle_tree);
+        evals.push(next_evals.clone());
         current_evals = next_evals;
         current_domain = next_domain;
     }
-    commitments
+    (merkle_trees, commitments, evals)
 }
 
-pub fn generate_prover_values(a0: Fr, a1: Fr, trace_length: usize) -> ProverValues {
+fn extract_path_from_merkle_tree(index: &usize, merkle_tree: &[Vec<[u8; 32]>]) -> Vec<[u8; 32]> {
+    let mut path = Vec::with_capacity(merkle_tree.len());
+    let mut current_index = index.clone();
+    for level in merkle_tree {
+        path.push(level[current_index]);
+        current_index /= 2;
+    }
+    path
+}
+
+fn calculate_query_proof(
+    q: usize,
+    blowup_factor: usize,
+    extended_trace_evals: &[Fr],
+    extended_trace_merkle_tree: &[Vec<[u8; 32]>],
+    cp_evals: &[Fr],
+    cp_merkle_tree: &[Vec<[u8; 32]>],
+    fri_evals: &[Vec<Fr>],
+    fri_merkle_tree: &[Vec<Vec<[u8; 32]>>],
+) -> QueryProof {
+    let f_x = ValueAndPath {
+        value: extended_trace_evals[q],
+        path: extract_path_from_merkle_tree(&q, extended_trace_merkle_tree),
+    };
+    let gq: usize = (q + blowup_factor) % extended_trace_evals.len();
+    let f_gx = ValueAndPath {
+        value: extended_trace_evals[gq],
+        path: extract_path_from_merkle_tree(&q, extended_trace_merkle_tree),
+    };
+    let ggq = (gq + blowup_factor) % extended_trace_evals.len();
+    let f_g2x = ValueAndPath {
+        value: extended_trace_evals[q],
+        path: extract_path_from_merkle_tree(&ggq, extended_trace_merkle_tree),
+    };
+    let mut cp_pairs = Vec::with_capacity(1 + fri_evals.len());
+    cp_pairs.push(CpPair {
+        cp_x: ValueAndPath {
+            value: cp_evals[q],
+            path: extract_path_from_merkle_tree(&q, cp_merkle_tree),
+        },
+        cp_minus_x: ValueAndPath {
+            value: cp_evals[(cp_evals.len() / 2 + q) % cp_evals.len()],
+            path: extract_path_from_merkle_tree(
+                &((cp_evals.len() / 2 + q) % cp_evals.len()),
+                cp_merkle_tree,
+            ),
+        },
+    });
+
+    for (i, (sub_cp_evals, sub_cp_merkle_tree)) in
+        fri_evals.iter().zip(fri_merkle_tree.iter()).enumerate()
+    {
+        let modulus = sub_cp_evals.len() as u128;
+        let mut index_u128 = (q % sub_cp_evals.len()) as u128;
+        for _ in 0..=i {
+            index_u128 = (index_u128 * index_u128) % modulus;
+        }
+        let index = index_u128 as usize;
+        let negative_index = (sub_cp_evals.len() / 2 + index) % sub_cp_evals.len();
+        cp_pairs.push(CpPair {
+            cp_x: ValueAndPath {
+                value: sub_cp_evals[index],
+                path: extract_path_from_merkle_tree(&index, sub_cp_merkle_tree),
+            },
+            cp_minus_x: ValueAndPath {
+                value: sub_cp_evals[negative_index],
+                path: extract_path_from_merkle_tree(&negative_index, sub_cp_merkle_tree),
+            },
+        });
+    }
+
+    QueryProof {
+        f_x,
+        f_gx,
+        f_g2x,
+        cp_pairs,
+    }
+}
+
+fn calculate_query_proofs(
+    num_queries: usize,
+    blowup_factor: usize,
+    extended_trace_evals: &[Fr],
+    extended_trace_merkle_tree: &[Vec<[u8; 32]>],
+    cp_evals: &[Fr],
+    cp_merkle_tree: &[Vec<[u8; 32]>],
+    fri_evals: &[Vec<Fr>],
+    fri_merkle_tree: &[Vec<Vec<[u8; 32]>>],
+) -> Vec<QueryProof> {
+    let mut fiat_shamir_seed: Vec<u8> = Vec::new();
+    fiat_shamir_seed.extend_from_slice(extended_trace_merkle_tree.last().unwrap().last().unwrap());
+    fiat_shamir_seed.extend_from_slice(cp_merkle_tree.last().unwrap().last().unwrap());
+    for commitment in fri_merkle_tree.iter().flat_map(|tree| tree.last()) {
+        for node in commitment {
+            fiat_shamir_seed.extend_from_slice(node);
+        }
+    }
+
+    let mut query_proofs = Vec::with_capacity(num_queries);
+
+    for _ in 0..num_queries {
+        let q = integer_from_hash(&fiat_shamir_seed, extended_trace_evals.len());
+        let query_proof = calculate_query_proof(
+            q,
+            blowup_factor,
+            extended_trace_evals,
+            extended_trace_merkle_tree,
+            cp_evals,
+            cp_merkle_tree,
+            fri_evals,
+            fri_merkle_tree,
+        );
+        for node in query_proof.f_x.path.iter() {
+            fiat_shamir_seed.extend_from_slice(node);
+        }
+        for node in query_proof.f_gx.path.iter() {
+            fiat_shamir_seed.extend_from_slice(node);
+        }
+        for node in query_proof.f_g2x.path.iter() {
+            fiat_shamir_seed.extend_from_slice(node);
+        }
+        for cp_pair in query_proof.cp_pairs.iter() {
+            for node in cp_pair.cp_x.path.iter() {
+                fiat_shamir_seed.extend_from_slice(node);
+            }
+            for node in cp_pair.cp_minus_x.path.iter() {
+                fiat_shamir_seed.extend_from_slice(node);
+            }
+        }
+        query_proofs.push(query_proof);
+    }
+
+    query_proofs
+}
+
+pub fn generate_prover_values(
+    a0: Fr,
+    a1: Fr,
+    trace_length: usize,
+    blowup_factor: usize,
+    num_queries: usize,
+) -> ProverValues {
     let trace = calculate_fib_square_trace(a0, a1, trace_length);
     let (trace_polynomial, domain) = calculate_trace_polynomial(&trace);
-    let (extended_trace, extended_domain) =
-        lde_on_coset(&trace_polynomial, trace_length, 8, Fr::GENERATOR);
-    let extended_trace_commitment = compute_merkle_root(&extended_trace);
-    let (cp_evaluations, cp_commitment) = calculate_composite_polynomial(
+    let (extended_trace, extended_domain) = lde_on_coset(
+        &trace_polynomial,
+        trace_length,
+        blowup_factor,
+        Fr::GENERATOR,
+    );
+    let (extended_trace_merke_tree, extended_trace_commitment) =
+        compute_merkle_root(&extended_trace);
+    let (cp_evaluations, cp_merkle_tree, cp_commitment) = calculate_composite_polynomial(
         &trace_polynomial,
         &domain,
         &extended_domain,
         *trace.last().unwrap(),
     );
     let extended_domain_points: Vec<Fr> = extended_domain.elements().collect();
-    let fri_commitments = calculate_fri_commitments(
+    let (fri_merkle_trees, fri_commitments, fri_evals) = calculate_fri_commitments(
         &cp_evaluations,
         &extended_domain_points,
         &extended_trace_commitment,
         &cp_commitment,
     );
+    let query_proofs = calculate_query_proofs(
+        num_queries,
+        blowup_factor,
+        &extended_trace,
+        &extended_trace_merke_tree,
+        &cp_evaluations,
+        &cp_merkle_tree,
+        &fri_evals,
+        &fri_merkle_trees,
+    );
     ProverValues {
         extended_trace_commitment,
         composite_polynomial_commitment: cp_commitment,
         fri_commitments,
+        queries_proofs: query_proofs,
     }
 }
