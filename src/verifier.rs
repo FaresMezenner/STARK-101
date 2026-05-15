@@ -90,11 +90,26 @@ fn verify_fri_layer(
     );
 }
 
-fn verify_final_fri_layer(final_cp_x: Fr, final_cp_minus_x: Fr) {
+fn verify_final_fri_layer(final_cp_x: Fr, final_cp_minus_x: Fr, final_layer_commitment: &[u8; 32]) {
     assert_eq!(
         final_cp_x, final_cp_minus_x,
         "Final FRI layer verification failed: final layer must be constant"
     );
+    let final_cp_hash = hash_leaf(&final_cp_x);
+    assert_eq!(
+        final_cp_hash, *final_layer_commitment,
+        "Final FRI layer verification failed: expected final layer commitment does not match computed hash of final CP evaluation"
+    );
+}
+
+fn verify_final_fri_layers_consistency(final_cp_x_list: &Vec<Fr>) {
+    let first_value = final_cp_x_list.first().unwrap();
+    for value in final_cp_x_list.iter().skip(1) {
+        assert_eq!(
+            *value, *first_value,
+            "Final FRI layer consistency check failed: all final CP evaluations must be the same"
+        );
+    }
 }
 
 fn verify_query(
@@ -196,7 +211,11 @@ fn verify_query(
         }
     }
     let final_cp_pair = query_proof.cp_pairs.last().unwrap();
-    verify_final_fri_layer(final_cp_pair.cp_x.value, final_cp_pair.cp_minus_x.value);
+    verify_final_fri_layer(
+        final_cp_pair.cp_x.value,
+        final_cp_pair.cp_minus_x.value,
+        fri_commitments.last().unwrap(),
+    );
 }
 
 pub fn verify(
@@ -212,6 +231,7 @@ pub fn verify(
     for commitment in &prover_values.fri_commitments {
         fiat_shamir_seed.extend_from_slice(commitment);
     }
+    let mut final_cp_x_list: Vec<Fr> = Vec::new();
     for query_proof in prover_values.queries_proofs.iter() {
         let q = integer_from_hash(&fiat_shamir_seed, size * blowup_factor);
         verify_query(
@@ -242,5 +262,7 @@ pub fn verify(
                 fiat_shamir_seed.extend_from_slice(node);
             }
         }
+        final_cp_x_list.push(query_proof.cp_pairs.last().unwrap().cp_x.value);
     }
+    verify_final_fri_layers_consistency(&final_cp_x_list);
 }
