@@ -67,3 +67,14 @@ pub fn random_fr_from_hash(input: &[u8]) -> Fr {
     bytes.copy_from_slice(&hash);
     Fr::from_le_bytes_mod_order(&bytes)
 }
+
+pub fn next_power_of_two(n: usize) -> usize {
+    if n == 0 {
+        return 1;
+    }
+    let mut power = 1;
+    while power < n {
+        power *= 2;
+    }
+    power
+}

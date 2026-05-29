@@ -3,7 +3,7 @@ use ark_ff::{BigInteger, FftField, Field, PrimeField};
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
 
 use crate::{
-    core::{hash_leaf, hash_pair, integer_from_hash, random_fr_from_hash},
+    core::{hash_leaf, hash_pair, integer_from_hash, next_power_of_two, random_fr_from_hash},
     data::{ProverValues, QueryProof},
 };
 
@@ -39,6 +39,7 @@ fn verify_trace_to_cp_consistency(
     trace_length: usize,
     _blowup_factor: usize,
     target_value: Fr,
+    target_index: usize,
 ) {
     let domain = GeneralEvaluationDomain::<Fr>::new(trace_length)
         .unwrap()
@@ -47,11 +48,16 @@ fn verify_trace_to_cp_consistency(
     let g = domain[1];
 
     let p0_at_x = (f_x - Fr::from(1u64)) / (query - Fr::from(1u64));
-    let p1_at_x = (f_x - target_value) / (query - g.pow([trace_length as u64 - 1u64]));
+    let p1_at_x = (f_x - target_value) / (query - g.pow([target_index as u64]));
+    let mut exclusion_product = Fr::from(1u64);
+    for i in (target_index + 1)..trace_length {
+        exclusion_product *= query - g.pow([i as u64]);
+    }
     let p2_at_x = (f_g2x - f_gx.square() - f_x.square())
-        / (query.pow([trace_length as u64]) - Fr::from(1u64))
-        * (query - g.pow([trace_length as u64 - 1u64]))
-        * (query - g.pow([trace_length as u64 - 2u64]));
+        * (query - g.pow([target_index as u64]))
+        * (query - g.pow([target_index as u64 - 1u64]))
+        * exclusion_product
+        / (query.pow([trace_length as u64]) - Fr::from(1u64));
 
     let mut alpha_seed: Vec<u8> = Vec::new();
     // use the target and generator of the domain as part of the seed
@@ -122,6 +128,7 @@ fn verify_query(
     size: usize,
     blowup_factor: usize,
     target_value: Fr,
+    target_index: usize,
 ) {
     let extended_domain = GeneralEvaluationDomain::<Fr>::new(size * blowup_factor)
         .unwrap()
@@ -158,6 +165,7 @@ fn verify_query(
         size,
         blowup_factor,
         target_value,
+        target_index,
     );
 
     let mut beta_seed: Vec<u8> = Vec::new();
@@ -220,11 +228,12 @@ fn verify_query(
 
 pub fn verify(
     prover_values: ProverValues,
-    size: usize,
+    target_index: usize,
     blowup_factor: usize,
-    _num_queries: usize,
+
     target_value: Fr,
 ) {
+    let size = next_power_of_two(target_index + 1);
     let mut fiat_shamir_seed: Vec<u8> = Vec::new();
     fiat_shamir_seed.extend_from_slice(&prover_values.extended_trace_commitment);
     fiat_shamir_seed.extend_from_slice(&prover_values.composite_polynomial_commitment);
@@ -243,6 +252,7 @@ pub fn verify(
             size,
             blowup_factor,
             target_value,
+            target_index,
         );
 
         for node in query_proof.f_x.path.iter() {

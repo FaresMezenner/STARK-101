@@ -43,3 +43,8 @@ Finally, the verifier will keep querying the prover for the evaluations of the p
 - The jump from each FRI layer to the next is correct: $CP'(q) = g'(q) + q·h'(q)$, where $g'(X)$ and $h'(X)$ are the even and odd parts of $CP'$ respectively.
 
 Like this, the verifier can be convinced that $CP$ is close to a low degree polynomial at the set of random points, which implies that $CP$ is a low degree polynomial with high probability, which in turn implies that the original statements about the trace are true with high probability.
+
+##  Part 5
+In this part I did a little modification so our protocol allows us to freely select any target index, not necessarily the last index in the trace of length that is a power of 2, previously it was hardcoded to 16.
+We did this by updating the third polynomial $p_3$ to include the product of indices to exclude from the verification so we can easily divide by the vanishing polynomial of the domain which we build using the next power of 2 of the target index + 1.
+We also updated the second polynomial so it is not hardcoded to the last index in the trace, but rather it uses the target index as a variable.

@@ -6,9 +6,9 @@ use ark_poly::{
     univariate::DensePolynomial,
 };
 
-use crate::core::compute_merkle_root;
 use crate::core::integer_from_hash;
 use crate::core::random_fr_from_hash;
+use crate::core::{compute_merkle_root, next_power_of_two};
 use crate::data::CpPair;
 use crate::data::ProverValues;
 use crate::data::QueryProof;
@@ -19,6 +19,7 @@ fn calculate_fib_square_trace(a0: Fr, a1: Fr, length: usize) -> Vec<Fr> {
 
     for i in 2..length {
         let next = trace[i - 1].square() + trace[i - 2].square();
+        // println!("fib squared at index {}: {} ", i, next);
         trace.push(next);
     }
 
@@ -61,6 +62,8 @@ fn calculate_composite_polynomial(
     extended_domain: &GeneralEvaluationDomain<Fr>,
     offset: Fr,
     target: Fr,
+    target_index: usize,
+    trace_length: usize,
 ) -> (Vec<Fr>, Vec<Vec<[u8; 32]>>, [u8; 32]) {
     // let f: DensePolynomial<Fr> = DensePolynomial::from_coefficients_vec(domain.ifft(trace));
 
@@ -78,18 +81,18 @@ fn calculate_composite_polynomial(
     let (p0, p0_remainder) = p0_numerator.divide_with_q_and_r(&p0_denominator).unwrap();
     assert!(p0_remainder.is_zero(), "p0 division must be exact");
 
-    // calculating p1 = (f(X) - a_{15}) / (X - g^15)
+    // calculating p1 = (f(X) - a_{traget_index}) / (X - g^{target_index})
     let p1_numerator: DenseOrSparsePolynomial<Fr> =
         DenseOrSparsePolynomial::from(f - &DensePolynomial::from_coefficients_vec(vec![target]));
     let p1_denominator: DenseOrSparsePolynomial<Fr> =
         DenseOrSparsePolynomial::from(DensePolynomial::from_coefficients_vec(vec![
-            -g.pow(&[15u64]),
+            -g.pow(&[target_index as u64]),
             Fr::from(1u64),
         ]));
     let (p1, p1_remainder) = p1_numerator.divide_with_q_and_r(&p1_denominator).unwrap();
     assert!(p1_remainder.is_zero(), "p1 division must be exact");
 
-    // calculating p3 = (f((g^2)X) - f(gX)^2 - f(X)^2) * (X - g^15) * (X - g^14) / (X^16 - 1)
+    // calculating p3 = (f((g^2)X) - f(gX)^2 - f(X)^2) * (X - g^{target_index}) * (X - g^{target_index-1}) / (X^{{target_index+1}} - 1)
     let f_g2x = DensePolynomial::from_coefficients_vec(
         f.coeffs
             .iter()
@@ -109,26 +112,27 @@ fn calculate_composite_polynomial(
     let tmp = &f_g2x - &f_gx_square;
     let transition_numerator = &tmp - &f_square;
 
-    let x_minus_g15 =
-        DensePolynomial::from_coefficients_vec(vec![-g.pow(&[15u64]), Fr::from(1u64)]);
-    let x_minus_g14 =
-        DensePolynomial::from_coefficients_vec(vec![-g.pow(&[14u64]), Fr::from(1u64)]);
-    let p3_numerator =
-        DenseOrSparsePolynomial::from(&(&transition_numerator * &x_minus_g15) * &x_minus_g14);
+    let x_minus_g_target_index = DensePolynomial::from_coefficients_vec(vec![
+        -g.pow(&[target_index as u64]),
+        Fr::from(1u64),
+    ]);
+    let x_minus_g_target_index_minus_one = DensePolynomial::from_coefficients_vec(vec![
+        -g.pow(&[(target_index - 1) as u64]),
+        Fr::from(1u64),
+    ]);
+    let mut exclusion_points_polynomial =
+        DensePolynomial::from_coefficients_vec(vec![Fr::from(1u64)]);
+    for i in (target_index + 1)..trace_length {
+        let factor =
+            DensePolynomial::from_coefficients_vec(vec![-g.pow(&[i as u64]), Fr::from(1u64)]);
+        exclusion_points_polynomial = &exclusion_points_polynomial * &factor;
+    }
+    let p3_numerator = DenseOrSparsePolynomial::from(
+        &(&(&transition_numerator * &x_minus_g_target_index) * &x_minus_g_target_index_minus_one)
+            * &exclusion_points_polynomial,
+    );
 
-    let p3_denominator = DenseOrSparsePolynomial::from(DensePolynomial::from_coefficients_vec(
-        (0..=16)
-            .map(|i| {
-                if i == 0 {
-                    -Fr::from(1u64)
-                } else if i == 16 {
-                    Fr::from(1u64)
-                } else {
-                    Fr::zero()
-                }
-            })
-            .collect(),
-    ));
+    let p3_denominator = DenseOrSparsePolynomial::from(domain.vanishing_polynomial());
     let (p3, p3_remainder) = p3_numerator.divide_with_q_and_r(&p3_denominator).unwrap();
     assert!(p3_remainder.is_zero(), "p3 division must be exact");
 
@@ -150,8 +154,7 @@ fn calculate_composite_polynomial(
         .enumerate()
         .map(|(i, &c)| c * offset.pow(&[i as u64]))
         .collect::<Vec<_>>();
-    let composite_polynomial_evaluations: Vec<Fr> =
-        extended_domain.fft(&shifted_coeffs);
+    let composite_polynomial_evaluations: Vec<Fr> = extended_domain.fft(&shifted_coeffs);
     let (cp_merkle_tree, cp_commitment) = compute_merkle_root(&composite_polynomial_evaluations);
     (
         composite_polynomial_evaluations,
@@ -270,8 +273,7 @@ fn calculate_query_proof(
         },
     });
 
-    for (sub_cp_evals, sub_cp_merkle_tree) in fri_evals.iter().zip(fri_merkle_tree.iter())
-    {
+    for (sub_cp_evals, sub_cp_merkle_tree) in fri_evals.iter().zip(fri_merkle_tree.iter()) {
         let index = q % sub_cp_evals.len();
         let negative_index = (sub_cp_evals.len() / 2 + index) % sub_cp_evals.len();
         cp_pairs.push(CpPair {
@@ -353,19 +355,16 @@ fn calculate_query_proofs(
 pub fn generate_prover_values(
     a0: Fr,
     a1: Fr,
-    trace_length: usize,
+    target_index: usize,
     blowup_factor: usize,
     num_queries: usize,
 ) -> ProverValues {
+    let trace_length = next_power_of_two(target_index + 1);
     let offset = Fr::GENERATOR;
     let trace = calculate_fib_square_trace(a0, a1, trace_length);
     let (trace_polynomial, domain) = calculate_trace_polynomial(&trace);
-    let (extended_trace, extended_domain) = lde_on_coset(
-        &trace_polynomial,
-        trace_length,
-        blowup_factor,
-        offset,
-    );
+    let (extended_trace, extended_domain) =
+        lde_on_coset(&trace_polynomial, trace_length, blowup_factor, offset);
     let (extended_trace_merke_tree, extended_trace_commitment) =
         compute_merkle_root(&extended_trace);
     let (cp_evaluations, cp_merkle_tree, cp_commitment) = calculate_composite_polynomial(
@@ -373,7 +372,9 @@ pub fn generate_prover_values(
         &domain,
         &extended_domain,
         offset,
-        *trace.last().unwrap(),
+        *trace.get(target_index).unwrap(),
+        target_index,
+        trace_length,
     );
     let extended_domain_points: Vec<Fr> = extended_domain.elements().map(|x| x * offset).collect();
     let (fri_merkle_trees, fri_commitments, fri_evals) = calculate_fri_commitments(
